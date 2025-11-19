@@ -7,65 +7,102 @@ const token = process.env.TELEGRAM_TOKEN;
 const geminiKey = process.env.GEMINI_API_KEY;
 
 if (!token || !geminiKey) {
-	console.error("Error: Token atau API Key belum diset.");
+	console.error("❌ Error: Token atau API Key belum diset.");
 	process.exit(1);
 }
 
-const bot = new TelegramBot(token, { polling: true });
+// --- KONFIGURASI STANDARD (LAPTOP) ---
+// Hapus 'baseApiUrl' agar konek ke server resmi Telegram
+const bot = new TelegramBot(token, {
+	polling: true,
+	baseApiUrl: "http://localhost:8081", // <--- TAMBAHKAN INI!
+});
+
 const genAI = new GoogleGenerativeAI(geminiKey);
 
-// INSTRUKSI PERSONA JOKO
 const systemInstruction = `
 Kamu adalah asisten AI bernama *Joko*.
 Persona:
 - Gaya bicara lu kayak anak tongkrongan, kasar dikit gapapa, pake lo/gue.
-- Lu konsisten pake bahasa gaul tapi tetep sopan kalau ngejelasin ilmu.
-- Kalau ada yang curhat, posisikan diri lu sebagai temen yang asik, kasih saran singkat padat jelas (jangan ngasih opsi A/B/C kayak robot).
-- Kalau user minta coding, kasih penjelasan yang gampang dimengerti.
-
-ATURAN FORMATTING (PENTING):
-1. Kode program WAJIB di dalam blok kode Markdown (\`\`\` ... \`\`\`).
-2. Jangan pakai Header Markdown (tanda pagar #), ganti pakai Bold biasa aja.
-3. Jangan pakai format LaTeX ($) untuk matematika.
+- Kalau user kirim AUDIO/LAGU: Tebak judul lagu dan penyanyinya.
+- Kalau user kirim VN/OMONGAN: Dengerin dan jawab maksudnya.
+- Kalau user kirim VIDEO: Jelasin apa yang terjadi di video itu.
 `;
 
-// Note: Menggunakan gemini-1.5-flash karena 2.5 belum stable release
 const model = genAI.getGenerativeModel({
-	model: "gemini-2.5-flash",
+	model: "gemini-2.5-pro",
 	systemInstruction: systemInstruction,
 });
 
-console.log("Bot Joko Siap Nongkrong ☕ (Formatter V2 Aktif)...");
+console.log("====================================================");
+console.log("💻 BOT JOKO SIAP (MODE LAPTOP / STANDARD)");
+console.log("👉 Support: Text, Foto, Audio, VN, Video (Max 20MB)");
+console.log("====================================================");
 
 bot.on("message", async (msg) => {
 	const chatId = msg.chat.id;
 	let userText = msg.caption || msg.text;
 
-	// Logika Deteksi Gambar / Dokumen
-	let photoFileId = null;
-	if (msg.photo && msg.photo.length > 0) {
-		photoFileId = msg.photo[msg.photo.length - 1].file_id;
-	} else if (msg.document && msg.document.mime_type.startsWith("image/")) {
-		photoFileId = msg.document.file_id;
+	console.log(`\n📩 Pesan dari: ${msg.from.first_name}`);
+
+	// --- 1. DETEKSI TIPE FILE ---
+	let fileId = null;
+	let mimeType = "";
+	let fileType = "TEXT";
+
+	if (msg.photo) {
+		fileId = msg.photo[msg.photo.length - 1].file_id;
+		mimeType = "image/jpeg";
+		fileType = "FOTO";
+	} else if (msg.voice) {
+		fileId = msg.voice.file_id;
+		mimeType = "audio/ogg";
+		fileType = "VOICE NOTE";
+	} else if (msg.audio) {
+		fileId = msg.audio.file_id;
+		mimeType = msg.audio.mime_type || "audio/mpeg";
+		fileType = "AUDIO MP3";
+	} else if (msg.video) {
+		fileId = msg.video.file_id;
+		mimeType = msg.video.mime_type || "video/mp4";
+		fileType = "VIDEO";
+	} else if (msg.document) {
+		const mime = msg.document.mime_type;
+		if (
+			mime &&
+			(mime.startsWith("image/") ||
+				mime.startsWith("audio/") ||
+				mime.startsWith("video/"))
+		) {
+			fileId = msg.document.file_id;
+			mimeType = mime;
+			fileType = "DOKUMEN MEDIA";
+		}
 	}
 
-	if (!userText && !photoFileId) return;
-	if (photoFileId && !userText) userText = "Woy Jok, jelasin ini gambar apaan?";
+	console.log(`🔍 Tipe Konten: ${fileType}`);
 
-	// --- ANIMASI BERPIKIR (JOKO STYLE) ---
+	if (!userText && !fileId) return;
+
+	// Default prompt
+	if (fileId && !userText) {
+		userText = "Analisis file media ini sesuai instruksi persona kamu.";
+	}
+
+	// --- ANIMASI BERPIKIR ---
 	let loadingMsgId = null;
 	let animationInterval = null;
 
 	try {
-		const sentMsg = await bot.sendMessage(chatId, "Bentar, gua cek dulu... 🚬");
+		const sentMsg = await bot.sendMessage(chatId, "Bentar, gua cek dulu... ");
 		loadingMsgId = sentMsg.message_id;
 
 		let frame = 0;
-		const frames = ["Mikir .", "Mikir ..", "Mikir ..."]; // Simpel aja biar gak kena limit
+		const frames = ["", ".", ".."];
 		animationInterval = setInterval(async () => {
 			frame = (frame + 1) % frames.length;
 			try {
-				await bot.editMessageText(frames[frame], {
+				await bot.editMessageText(`Lagi mikir ${frames[frame]}`, {
 					chat_id: chatId,
 					message_id: loadingMsgId,
 				});
@@ -74,32 +111,45 @@ bot.on("message", async (msg) => {
 
 		// --- REQUEST GEMINI ---
 		let result;
-		if (photoFileId) {
-			console.log(`[Visual] ${msg.from.first_name} kirim gambar`);
-			const fileLink = await bot.getFileLink(photoFileId);
-			const imageResponse = await axios.get(fileLink, {
+		if (fileId) {
+			console.log(`⬇️  Mendownload File dari Telegram Server...`);
+
+			// 1. Minta Link (Akan dapat link https://api.telegram.org/...)
+			const fileLink = await bot.getFileLink(fileId);
+
+			// 2. Download Buffer
+			const mediaResponse = await axios.get(fileLink, {
 				responseType: "arraybuffer",
 			});
-			const imagePart = {
+			const bufferData = Buffer.from(mediaResponse.data);
+
+			console.log(
+				`✅ Download Selesai! Ukuran: ${(bufferData.length / 1024).toFixed(
+					2
+				)} KB`
+			);
+
+			const mediaPart = {
 				inlineData: {
-					data: Buffer.from(imageResponse.data).toString("base64"),
-					mimeType: "image/jpeg",
+					data: bufferData.toString("base64"),
+					mimeType: mimeType,
 				},
 			};
-			result = await model.generateContent([userText, imagePart]);
+
+			console.log(`📤 Mengirim ke Gemini...`);
+			result = await model.generateContent([userText, mediaPart]);
 		} else {
-			console.log(`[Text] ${msg.from.first_name}: ${userText}`);
+			console.log(`📤 Mengirim Teks ke Gemini...`);
 			result = await model.generateContent(userText);
 		}
 
 		const response = await result.response;
 		const rawReply = response.text();
+		console.log(`✅ Gemini Membalas Selesai.`);
 
-		// Matikan animasi
 		clearInterval(animationInterval);
 		await bot.deleteMessage(chatId, loadingMsgId);
 
-		// --- KIRIM JAWABAN DENGAN FORMATTER BARU ---
 		await sendFormattedMessage(chatId, rawReply);
 	} catch (error) {
 		if (animationInterval) clearInterval(animationInterval);
@@ -108,32 +158,28 @@ bot.on("message", async (msg) => {
 				await bot.deleteMessage(chatId, loadingMsgId);
 			} catch (e) {}
 
-		console.error("Error:", error.message);
-		bot.sendMessage(
-			chatId,
-			"Duh sori bro, otak gua lagi nge-lag nih (Error Server). Coba tanya lagi tar."
-		);
+		console.error("❌ ERROR:", error.message);
+
+		let errorMsg = "Duh error bro.";
+		if (error.message.includes("file is too big")) {
+			errorMsg = "Waduh, filenya kegedean bro! Di laptop limitnya cuma 20MB.";
+		}
+		bot.sendMessage(chatId, errorMsg);
 	}
 });
 
-// --- FUNGSI FORMATTER SPESIAL (MARKDOWN V2) ---
-// Ini rahasianya biar codingan rapi tapi teks biasa gak error
+// --- FORMATTER ---
 async function sendFormattedMessage(chatId, text) {
-	// 1. Sanitasi teks agar sesuai standar MarkdownV2 Telegram
 	const formattedText = cleanMarkdownV2(text);
 	const maxChars = 4000;
-
 	const sendChunk = async (chunk) => {
 		try {
-			// Coba kirim pakai MarkdownV2
 			await bot.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
 		} catch (error) {
-			console.log("Markdown V2 Error (Fallback ke plain text):", error.message);
-			// Kalau masih error (jarang terjadi), kirim polos aja biar pesannya nyampe
+			console.log("⚠️ Markdown Error, kirim polos.");
 			await bot.sendMessage(chatId, text);
 		}
 	};
-
 	if (formattedText.length <= maxChars) {
 		await sendChunk(formattedText);
 	} else {
@@ -143,27 +189,13 @@ async function sendFormattedMessage(chatId, text) {
 	}
 }
 
-// Fungsi Pembersih Karakter Khusus
 function cleanMarkdownV2(text) {
-	// Pecah pesan berdasarkan Code Block (```)
-	// Kita gak mau ngubah-ngubah isi codingan
 	const parts = text.split(/(```[\s\S]*?```)/g);
-
 	return parts
 		.map((part) => {
-			// Kalau ini adalah blok kode, biarin aja
-			if (part.startsWith("```")) {
-				return part;
-			}
-
-			// Kalau ini teks biasa (penjelasan), kita harus escape karakter aneh
-			// Karakter yang harus di-escape di Telegram V2: _ * [ ] ( ) ~ > # + - = | { } . !
-			let escaped = part.replace(/([_*\[\]()~>#\+\-=|{}.!])/g, "\\$1"); // Tambah backslash di depan simbol
-
-			// FIX BOLD: Gemini kasih **teks**, setelah di-escape jadi \*\*teks\*\*
-			// Telegram maunya *teks*. Jadi kita ubah manual.
+			if (part.startsWith("```")) return part;
+			let escaped = part.replace(/([_*\[\]()~>#\+\-=|{}.!])/g, "\\$1");
 			escaped = escaped.replace(/\\\*\\\*(.*?)\\\*\\\*/g, "*$1*");
-
 			return escaped;
 		})
 		.join("");
