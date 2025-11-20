@@ -11,10 +11,10 @@ if (!token || !geminiKey) {
 	process.exit(1);
 }
 
-// --- KONFIGURASI VPS (DENGAN DOCKER LOKAL) ---
+// --- KONFIGURASI ---
 const bot = new TelegramBot(token, {
 	polling: true,
-	// Wajib arahkan ke Docker Local Server biar limit 2GB & support file besar
+	// ⚠️ PENTING: Uncomment baris di bawah ini HANYA JIKA menggunakan VPS + Docker
 	// baseApiUrl: "http://localhost:8081",
 });
 
@@ -29,23 +29,22 @@ Persona:
 - Kalau user kirim VIDEO: Jelasin apa yang terjadi di video itu.
 `;
 
-// Gunakan 1.5-flash (Cepat & Support Audio/Video)
-// Jangan pakai 2.5-pro dulu karena belum stabil
+// Menggunakan 1.5-flash yang stabil & cepat untuk edit message
 const model = genAI.getGenerativeModel({
-	model: "gemini-2.5-flash",
+	model: "gemini-2.5-pro",
 	systemInstruction: systemInstruction,
 });
 
 console.log("====================================================");
-console.log("🚀 BOT JOKO SIAP (MODE VPS + LOCAL DOCKER)");
-console.log("👉 Support: Text, Foto, Audio, VN, Video (Max 2GB)");
+console.log("🚀 BOT JOKO SIAP (SEAMLESS EDIT MODE)");
+console.log("👉 Pesan 'Loading' akan berubah langsung jadi Jawaban");
 console.log("====================================================");
 
 bot.on("message", async (msg) => {
 	const chatId = msg.chat.id;
 	let userText = msg.caption || msg.text;
 
-	// Log sederhana biar terminal gak penuh
+	// Log sederhana
 	console.log(`\n📩 Pesan dari: ${msg.from.first_name}`);
 
 	// --- 1. DETEKSI TIPE FILE ---
@@ -86,73 +85,64 @@ bot.on("message", async (msg) => {
 	if (fileType !== "TEXT") console.log(`🔍 Tipe Konten: ${fileType}`);
 
 	if (!userText && !fileId) return;
-
-	if (fileId && !userText) {
+	if (fileId && !userText)
 		userText = "Analisis file media ini sesuai instruksi persona kamu.";
-	}
 
-	// --- ANIMASI BERPIKIR ---
+	// --- SETUP ANIMASI ---
 	let loadingMsgId = null;
 	let animationInterval = null;
 
 	try {
-		const sentMsg = await bot.sendMessage(chatId, "Bentar, gua cek dulu... 🎧");
+		// 1. Kirim Pesan Loading Awal
+		const sentMsg = await bot.sendMessage(chatId, "Bentar...", {
+			parse_mode: "Markdown",
+		});
 		loadingMsgId = sentMsg.message_id;
 
-		let frame = 0;
-		const frames = ["⏳", "⏳.", "⏳.."];
+		// 2. Jalankan Animasi Edit (Spinner)
+		// Animasi ini akan mengedit pesan yang sama berulang-ulang
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+		let frameIndex = 0;
+
 		animationInterval = setInterval(async () => {
-			frame = (frame + 1) % frames.length;
+			frameIndex = (frameIndex + 1) % frames.length;
 			try {
-				await bot.editMessageText(`Lagi mikir ${frames[frame]}`, {
+				await bot.editMessageText(`${frames[frameIndex]} Lagi mikir...`, {
 					chat_id: chatId,
 					message_id: loadingMsgId,
+					parse_mode: "Markdown",
 				});
-			} catch (e) {}
-		}, 2000);
+			} catch (e) {
+				// Error sering terjadi jika edit terlalu cepat, abaikan saja agar tidak crash
+			}
+		}, 400); // Jeda 1.5 detik (Aman dari limit Telegram)
 
 		// --- REQUEST GEMINI ---
 		let result;
 		if (fileId) {
-			console.log(`⬇️  Mendownload File dari Local Server...`);
-
-			// 1. Minta Link (Dapat Link Localhost)
+			console.log(`⬇️  Mendownload File...`);
 			const fileLink = await bot.getFileLink(fileId);
-			console.log(`🔗 Link: ${fileLink}`);
 
-			// 2. LOGIKA RETRY (PENTING UNTUK LOCAL SERVER)
-			// Kita coba download 5 kali. Kalau 404, tunggu 1 detik lalu coba lagi.
+			// Logika Retry Download (Wajib untuk Local Server)
 			let mediaResponse = null;
 			let attempts = 0;
-			const maxAttempts = 5;
-
-			while (attempts < maxAttempts) {
+			while (attempts < 5) {
 				try {
 					mediaResponse = await axios.get(fileLink, {
 						responseType: "arraybuffer",
 					});
-					break; // Sukses! Keluar loop
+					break;
 				} catch (err) {
 					if (err.response && err.response.status === 404) {
 						attempts++;
-						console.log(
-							`⏳ Server belum siap (404). Tunggu bentar... (${attempts}/${maxAttempts})`
-						);
-						await new Promise((r) => setTimeout(r, 1500)); // Tunggu 1.5 detik
+						await new Promise((r) => setTimeout(r, 1500));
 					} else {
-						throw err; // Error lain lempar aja
+						throw err;
 					}
 				}
 			}
 
-			if (!mediaResponse)
-				throw new Error("Gagal download file (Timeout Local Server).");
-
-			console.log(
-				`✅ Download OK! Size: ${(mediaResponse.data.length / 1024).toFixed(
-					2
-				)} KB`
-			);
+			if (!mediaResponse) throw new Error("Gagal download file (Timeout).");
 
 			const mediaPart = {
 				inlineData: {
@@ -160,7 +150,6 @@ bot.on("message", async (msg) => {
 					mimeType: mimeType,
 				},
 			};
-
 			console.log(`📤 Mengirim ke Gemini...`);
 			result = await model.generateContent([userText, mediaPart]);
 		} else {
@@ -172,48 +161,71 @@ bot.on("message", async (msg) => {
 		const rawReply = response.text();
 		console.log(`✅ Gemini Membalas.`);
 
+		// --- STEP PENTING: TRANSISI MULUS ---
+		// Matikan animasi dulu
 		clearInterval(animationInterval);
-		await bot.deleteMessage(chatId, loadingMsgId);
 
-		await sendFormattedMessage(chatId, rawReply);
+		// Panggil fungsi edit canggih (Bukan delete)
+		await sendSeamlessReply(chatId, loadingMsgId, rawReply);
 	} catch (error) {
 		if (animationInterval) clearInterval(animationInterval);
-		if (loadingMsgId)
-			try {
-				await bot.deleteMessage(chatId, loadingMsgId);
-			} catch (e) {}
-
 		console.error("❌ ERROR:", error.message);
 
-		let errorMsg = "Duh error bro.";
-		if (error.message.includes("ECONNREFUSED")) {
-			errorMsg = "Waduh, Docker Local Server mati nih. Cek VPS lu!";
+		// Jika error, Ubah pesan loading menjadi pesan error
+		if (loadingMsgId) {
+			try {
+				await bot.editMessageText("❌ _Duh error bro: " + error.message + "_", {
+					chat_id: chatId,
+					message_id: loadingMsgId,
+					parse_mode: "Markdown",
+				});
+			} catch (e) {}
 		}
-		bot.sendMessage(chatId, errorMsg);
 	}
 });
 
-// --- FORMATTER MARKDOWN V2 ---
-async function sendFormattedMessage(chatId, text) {
+// --- FUNGSI REPLY CANGGIH (EDIT MODE) ---
+async function sendSeamlessReply(chatId, messageIdToEdit, text) {
 	const formattedText = cleanMarkdownV2(text);
-	const maxChars = 4000;
-	const sendChunk = async (chunk) => {
-		try {
-			await bot.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
-		} catch (error) {
-			console.log("⚠️ Markdown Error, kirim polos.");
-			await bot.sendMessage(chatId, text);
-		}
-	};
+	const maxChars = 4000; // Batas aman Telegram
+
+	// SKENARIO 1: Pesan Pendek (Langsung Edit)
 	if (formattedText.length <= maxChars) {
-		await sendChunk(formattedText);
-	} else {
+		try {
+			// Kita EDIT pesan "Loading..." menjadi Jawaban
+			await bot.editMessageText(formattedText, {
+				chat_id: chatId,
+				message_id: messageIdToEdit,
+				parse_mode: "MarkdownV2",
+			});
+		} catch (error) {
+			// Fallback jika MarkdownV2 gagal, kirim text biasa (masih edit)
+			await bot.editMessageText(text, {
+				chat_id: chatId,
+				message_id: messageIdToEdit,
+			});
+		}
+	}
+	// SKENARIO 2: Pesan Panjang (Terpaksa Delete & Kirim Ulang)
+	// Karena Telegram tidak bisa mengedit pesan menjadi 2 bagian terpisah
+	else {
+		try {
+			await bot.deleteMessage(chatId, messageIdToEdit);
+		} catch (e) {}
+
+		// Kirim berantai (Chunking)
 		for (let i = 0; i < formattedText.length; i += maxChars) {
-			await sendChunk(formattedText.substring(i, i + maxChars));
+			const chunk = formattedText.substring(i, i + maxChars);
+			try {
+				await bot.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
+			} catch (error) {
+				await bot.sendMessage(chatId, chunk);
+			}
 		}
 	}
 }
 
+// Pembersih Markdown V2
 function cleanMarkdownV2(text) {
 	const parts = text.split(/(```[\s\S]*?```)/g);
 	return parts
