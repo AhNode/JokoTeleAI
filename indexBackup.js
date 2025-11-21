@@ -14,7 +14,8 @@ if (!token || !geminiKey) {
 // --- KONFIGURASI ---
 const bot = new TelegramBot(token, {
 	polling: true,
-	// baseApiUrl: "http://localhost:8081", // Uncomment jika pakai Local Server
+	// ⚠️ PENTING: Uncomment baris di bawah ini HANYA JIKA menggunakan VPS + Docker
+	// baseApiUrl: "http://localhost:8081",
 });
 
 const genAI = new GoogleGenerativeAI(geminiKey);
@@ -28,68 +29,23 @@ Persona:
 - Kalau user kirim VIDEO: Jelasin apa yang terjadi di video itu.
 `;
 
-// Menggunakan model 1.5-flash/pro
+// Menggunakan 1.5-flash yang stabil & cepat untuk edit message
 const model = genAI.getGenerativeModel({
-	model: "gemini-2.5-pro", // Atau gemini-1.5-flash
+	model: "gemini-2.5-pro",
 	systemInstruction: systemInstruction,
 });
 
-// --- VARIABEL SESSION & RUNTIME ---
-const activeSessions = new Map(); // Tempat simpan ingatan: chatId -> chatSession
-const startTime = Date.now(); // Waktu mulai bot
-
-// Fungsi hitung runtime
-function getUptime() {
-	const now = Date.now();
-	const diff = now - startTime;
-
-	const seconds = Math.floor((diff / 1000) % 60);
-	const minutes = Math.floor((diff / (1000 * 60)) % 60);
-	const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
-	const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-
-	let uptimeStr = "";
-	if (days > 0) uptimeStr += `${days} hari, `;
-	if (hours > 0) uptimeStr += `${hours} jam, `;
-	if (minutes > 0) uptimeStr += `${minutes} menit, `;
-	uptimeStr += `${seconds} detik.`;
-
-	return uptimeStr;
-}
-
 console.log("====================================================");
-console.log("🚀 BOT JOKO SIAP (MEMORY + RUNTIME MODE)");
-console.log("👉 /new untuk reset ingatan");
-console.log("👉 /runtime untuk cek durasi on");
+console.log("🚀 BOT JOKO SIAP (SEAMLESS EDIT MODE)");
+console.log("👉 Pesan 'Loading' akan berubah langsung jadi Jawaban");
 console.log("====================================================");
 
 bot.on("message", async (msg) => {
 	const chatId = msg.chat.id;
-	let userText = msg.caption || msg.text || "";
+	let userText = msg.caption || msg.text;
 
 	// Log sederhana
-	console.log(`\n📩 Pesan dari: ${msg.from.first_name} (${chatId})`);
-
-	// --- 0. CEK COMMANDS (/new & /runtime) ---
-	if (userText.toLowerCase() === "/new") {
-		activeSessions.delete(chatId); // Hapus sesi
-		await bot.sendMessage(
-			chatId,
-			"*Ingatan udah gue reset bro.* Kita mulai dari nol ya!",
-			{ parse_mode: "Markdown" }
-		);
-		return;
-	}
-
-	if (userText.toLowerCase() === "/runtime") {
-		const uptime = getUptime();
-		await bot.sendMessage(
-			chatId,
-			`⏱️ *Runtime Joko:*\nBot udah nyala selama: ${uptime}`,
-			{ parse_mode: "Markdown" }
-		);
-		return;
-	}
+	console.log(`\n📩 Pesan dari: ${msg.from.first_name}`);
 
 	// --- 1. DETEKSI TIPE FILE ---
 	let fileId = null;
@@ -128,58 +84,46 @@ bot.on("message", async (msg) => {
 
 	if (fileType !== "TEXT") console.log(`🔍 Tipe Konten: ${fileType}`);
 
-	// Jika cuma teks kosong dan gak ada file, skip (kecuali command di atas sudah handle)
 	if (!userText && !fileId) return;
-
-	// Default text jika kirim file doang
-	if (fileId && !userText) userText = "Analisis file ini bro.";
+	if (fileId && !userText)
+		userText = "Analisis file media ini sesuai instruksi persona kamu.";
 
 	// --- SETUP ANIMASI ---
 	let loadingMsgId = null;
 	let animationInterval = null;
 
 	try {
-		// 1. Kirim Pesan Loading
+		// 1. Kirim Pesan Loading Awal
 		const sentMsg = await bot.sendMessage(chatId, "Bentar...", {
 			parse_mode: "Markdown",
 		});
 		loadingMsgId = sentMsg.message_id;
 
-		// 2. Animasi Spinner
-		const frames = ["", ".", "..", "...", "..", "."];
+		// 2. Jalankan Animasi Edit (Spinner)
+		// Animasi ini akan mengedit pesan yang sama berulang-ulang
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 		let frameIndex = 0;
+
 		animationInterval = setInterval(async () => {
 			frameIndex = (frameIndex + 1) % frames.length;
 			try {
-				await bot.editMessageText(`Lagi mikir${frames[frameIndex]}`, {
+				await bot.editMessageText(`${frames[frameIndex]} Lagi mikir...`, {
 					chat_id: chatId,
 					message_id: loadingMsgId,
 					parse_mode: "Markdown",
 				});
-			} catch (e) {}
-		}, 750); // Agak dilambatin biar gak kena limit Telegram
-
-		// --- MANAJEMEN SESSION (MEMORY) ---
-		// Cek apakah user ini udah punya sesi?
-		let chatSession = activeSessions.get(chatId);
-
-		if (!chatSession) {
-			// Kalau belum, buat sesi baru
-			chatSession = model.startChat({
-				history: [], // Mulai dengan history kosong (System instruction udah di-inject di model)
-			});
-			activeSessions.set(chatId, chatSession);
-			console.log(`🧠 Sesi baru dibuat untuk ${chatId}`);
-		}
+			} catch (e) {
+				// Error sering terjadi jika edit terlalu cepat, abaikan saja agar tidak crash
+			}
+		}, 400); // Jeda 1.5 detik (Aman dari limit Telegram)
 
 		// --- REQUEST GEMINI ---
 		let result;
-
 		if (fileId) {
 			console.log(`⬇️  Mendownload File...`);
 			const fileLink = await bot.getFileLink(fileId);
 
-			// Retry logic download
+			// Logika Retry Download (Wajib untuk Local Server)
 			let mediaResponse = null;
 			let attempts = 0;
 			while (attempts < 5) {
@@ -189,11 +133,16 @@ bot.on("message", async (msg) => {
 					});
 					break;
 				} catch (err) {
-					attempts++;
-					await new Promise((r) => setTimeout(r, 1000));
+					if (err.response && err.response.status === 404) {
+						attempts++;
+						await new Promise((r) => setTimeout(r, 1500));
+					} else {
+						throw err;
+					}
 				}
 			}
-			if (!mediaResponse) throw new Error("Gagal download file.");
+
+			if (!mediaResponse) throw new Error("Gagal download file (Timeout).");
 
 			const mediaPart = {
 				inlineData: {
@@ -201,36 +150,31 @@ bot.on("message", async (msg) => {
 					mimeType: mimeType,
 				},
 			};
-			console.log(`📤 Mengirim ke Gemini (dengan Memory)...`);
-
-			// PENTING: Kirim array [text, media] ke sendMessage session
-			result = await chatSession.sendMessage([userText, mediaPart]);
+			console.log(`📤 Mengirim ke Gemini...`);
+			result = await model.generateContent([userText, mediaPart]);
 		} else {
-			console.log(`📤 Mengirim Teks ke Gemini (dengan Memory)...`);
-			// PENTING: Pakai chatSession.sendMessage bukan model.generateContent
-			result = await chatSession.sendMessage(userText);
+			console.log(`📤 Mengirim Teks ke Gemini...`);
+			result = await model.generateContent(userText);
 		}
 
 		const response = await result.response;
 		const rawReply = response.text();
 		console.log(`✅ Gemini Membalas.`);
 
+		// --- STEP PENTING: TRANSISI MULUS ---
+		// Matikan animasi dulu
 		clearInterval(animationInterval);
+
+		// Panggil fungsi edit canggih (Bukan delete)
 		await sendSeamlessReply(chatId, loadingMsgId, rawReply);
 	} catch (error) {
 		if (animationInterval) clearInterval(animationInterval);
 		console.error("❌ ERROR:", error.message);
 
-		// Jika errornya karena Safety/Blocked
-		let errorMsg = "❌ _Duh error bro: " + error.message + "_";
-		if (error.message.includes("SAFETY")) {
-			errorMsg =
-				"❌ _Waduh, bahasan lo terlalu bahaya bro, gue gak berani jawab._";
-		}
-
+		// Jika error, Ubah pesan loading menjadi pesan error
 		if (loadingMsgId) {
 			try {
-				await bot.editMessageText(errorMsg, {
+				await bot.editMessageText("❌ _Duh error bro: " + error.message + "_", {
 					chat_id: chatId,
 					message_id: loadingMsgId,
 					parse_mode: "Markdown",
@@ -243,26 +187,33 @@ bot.on("message", async (msg) => {
 // --- FUNGSI REPLY CANGGIH (EDIT MODE) ---
 async function sendSeamlessReply(chatId, messageIdToEdit, text) {
 	const formattedText = cleanMarkdownV2(text);
-	const maxChars = 4000;
+	const maxChars = 4000; // Batas aman Telegram
 
+	// SKENARIO 1: Pesan Pendek (Langsung Edit)
 	if (formattedText.length <= maxChars) {
 		try {
+			// Kita EDIT pesan "Loading..." menjadi Jawaban
 			await bot.editMessageText(formattedText, {
 				chat_id: chatId,
 				message_id: messageIdToEdit,
 				parse_mode: "MarkdownV2",
 			});
 		} catch (error) {
+			// Fallback jika MarkdownV2 gagal, kirim text biasa (masih edit)
 			await bot.editMessageText(text, {
 				chat_id: chatId,
 				message_id: messageIdToEdit,
 			});
 		}
-	} else {
+	}
+	// SKENARIO 2: Pesan Panjang (Terpaksa Delete & Kirim Ulang)
+	// Karena Telegram tidak bisa mengedit pesan menjadi 2 bagian terpisah
+	else {
 		try {
 			await bot.deleteMessage(chatId, messageIdToEdit);
 		} catch (e) {}
 
+		// Kirim berantai (Chunking)
 		for (let i = 0; i < formattedText.length; i += maxChars) {
 			const chunk = formattedText.substring(i, i + maxChars);
 			try {
@@ -274,6 +225,7 @@ async function sendSeamlessReply(chatId, messageIdToEdit, text) {
 	}
 }
 
+// Pembersih Markdown V2
 function cleanMarkdownV2(text) {
 	const parts = text.split(/(```[\s\S]*?```)/g);
 	return parts
