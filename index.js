@@ -68,7 +68,9 @@ bot.on("message", async (msg) => {
 	let userText = msg.caption || msg.text || "";
 
 	// Log sederhana
-	console.log(`\n📩 Pesan dari: ${msg.from.first_name} (${chatId})`);
+	console.log(
+		`\n📩 Pesan dari: ${msg.from.first_name} (${chatId}) \n\n${msg.text}\n`
+	);
 
 	// --- 0. CEK COMMANDS (/new & /runtime) ---
 	if (userText.toLowerCase() === "/new") {
