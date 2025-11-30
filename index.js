@@ -69,7 +69,7 @@ bot.on("message", async (msg) => {
 
 	// Log sederhana
 	console.log(
-		`\n📩 Pesan dari: ${msg.from.first_name} (${chatId}) \n📩	${msg.text}\n`
+		`\n📩 Pesan dari: ${msg.from.first_name} (${chatId}) \n📩 ${msg.text}\n`
 	);
 
 	// --- 0. CEK COMMANDS (/new & /runtime) ---
